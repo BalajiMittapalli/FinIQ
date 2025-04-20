@@ -5,15 +5,22 @@ import os
 
 def auto_draft_response(metadata):
     # Use Ollama to draft the response
-    prompt = f"""You are an AI assistant that specializes in drafting formal business letters.
-    Based on the following metadata, draft a professional and understandable response letter in the first person.
-    Include all available information in the letter. If a piece of information is not available, do not include it.
-    The letter should be well-written and easy to understand.
-    The letter should be addressed to the client.
-    The letter should include the full issue date.
-    The letter should be signed by Adilya Traders.
-    The sender's contact information is Praveen N - 9876543210, Braven N - 9876543210, buildersconcrete@mail.com.
-    Metadata: {metadata}
+    prompt = f"""You are a professional tax‑law assistant drafting formal reply letters to Income‑Tax Department notices.
+
+    Using the information below, compose a clear, concise, and courteous response letter. The tone should be respectful but firm, addressing each point raised in the Show‑Cause Notice. Include:
+
+      • A proper salutation and reference to the Notice DIN
+      • A brief introduction of the taxpayer and their PAN/GSTIN
+      • A point‑by‑point rebuttal or explanation for each allegation (e.g., source of cash deposit)
+      • Citation of supporting documents or evidence where relevant
+      • A polite closing asking for confirmation of receipt and any further clarifications
+      • Date and place of signing
+
+---
+Given the following extracted text from an Income Tax Notice, please draft a formal reply letter. Extract all the necessary information from the text.
+{metadata}
+---
+Draft the letter below this line:
     """
     try:
         result = subprocess.run(['ollama', 'run', 'mistral', prompt], capture_output=True, text=True, check=True, encoding='utf-8')

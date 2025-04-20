@@ -11,7 +11,7 @@ def perform_ocr(image_path):
     Performs OCR on the given image using docling.DocumentConverter.
     """
     try:
-        # Use the converter to process the image file directly
+        # Use the converter to process the file directly
         result = converter.convert(image_path)
 
         # Check if conversion was successful and a document object exists
@@ -23,7 +23,7 @@ def perform_ocr(image_path):
             # Handle cases where conversion failed or no document was produced
             print(f"Warning: No document found in the result for {image_path}")
             return None
-
+    
     # Catch potential exceptions during conversion
     except Exception as e:
         print(f"Error processing image {image_path} with DocumentConverter: {e}")
@@ -34,7 +34,7 @@ def main():
     Main function to iterate through images in the data folder and perform OCR.
     """
     data_folder = "data"
-    image_files = [f for f in os.listdir(data_folder) if f.endswith(('.png', '.jpg', '.jpeg'))]
+    image_files = [f for f in os.listdir(data_folder) if f.endswith(('.png', '.jpg', '.jpeg', '.pdf'))]
 
     if not image_files:
         print("No image files found in the data folder.")
@@ -52,9 +52,27 @@ def main():
             print("No text extracted or error occurred.")
         print("-" * 30)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
+
+    # Call response generator
+    from tools.response_generator import auto_draft_response
+    import glob
     
+    # Get the list of pdf files
+    pdf_files = glob.glob("data/*.pdf")
+    
+    # Loop through each pdf file
+    for pdf_file in pdf_files:
+        # Extract the file name
+        file_name = os.path.basename(pdf_file)
+        # Perform OCR
+        extracted_text = perform_ocr(pdf_file)
+        # Generate the response letter
+        response_letter = auto_draft_response(extracted_text)
+        # Save the response letter to a file
+        with open(f"{file_name.replace('.pdf', '')}_response.txt", "w") as f:
+            f.write(response_letter)
 
 
 # import os
