@@ -1,0 +1,8 @@
+env/
+__pycache__/
+*.pyc
+*.log
+data/
+response.docx
+invoice.json
+image.md
