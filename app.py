@@ -3,35 +3,26 @@ import subprocess
 import os
 import shutil
 from tools.ocr_script import perform_ocr
-from tools.response_generator import auto_draft_response
+from tools.response_generator import auto_draft_response, save_response_to_docx
+import database  # Import database functions
 from docx import Document  # Import Document
 from io import BytesIO    # Import BytesIO
+from tools.metadata_extractor import extract_metadata # Import metadata extraction
+import re # Import regex module
+from datetime import datetime # Import datetime for reminders
+import pandas as pd
 
-# Define key financial data points (assuming it's defined elsewhere or here)
-DATA_POINTS = {
-    "revenue": {"question": "What was your total revenue for the period?", "extracted": False, "value": 0},
-    "expenses": {"question": "What were your total expenses for the period?", "extracted": False, "value": 0},
-    "assets": {"question": "What were your total assets at the end of the period?", "extracted": False, "value": 0},
-    "liabilities": {"question": "What were your total liabilities at the end of the period?", "extracted": False, "value": 0},
-}
+# Initialize database
+database.create_database()
 
-# Define tasks for the agent (assuming it's defined elsewhere or here)
-TASKS = [
-    "Gather all financial data points (revenue, expenses, assets, liabilities).",
-    "Generate a Balance Sheet.",
-    "Generate an Income Statement.",
-    "Generate a Tax Calculation report."
-]
-
-# Initialize session state
+# Initialize session state for chat
 if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "data_points" not in st.session_state:
-    st.session_state.data_points = DATA_POINTS
-if "tasks" not in st.session_state:
-    st.session_state.tasks = TASKS
-if "current_task_index" not in st.session_state:
-    st.session_state.current_task_index = 0
+    st.session_state.messages = [{"role": "assistant", "content": "How can I assist you with financial matters today?"}]
+if "due_date" not in st.session_state:
+    st.session_state.due_date = None # Initialize due_date in session state
+if "selected_client_id" not in st.session_state:
+    st.session_state.selected_client_id = None
+
 
 # Configure page
 st.set_page_config(page_title="FinIQ", layout="wide")
@@ -46,276 +37,464 @@ with col1:
 with col2:
     st.title("FinIQ")
 
-# Display chat messages from history on app rerun
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        # Check if content is editable response structure
-        if isinstance(message["content"], dict) and "original" in message["content"]:
-             # For display purposes in history, show the original or last edited
-             # You might want to refine how edited history is stored/shown
-             st.markdown(message["content"]["original"]) # Or store/show edited version
+# --- Core Financial Calculations ---
+def parse_excel_data(file):
+    """Parses the uploaded Excel file and extracts relevant data."""
+    try:
+        # Read the Excel file into a pandas DataFrame
+        df = pd.read_excel(file)
+        # Basic validation: Check if essential columns might exist (adjust column names as needed)
+        # This is a very basic check; more robust validation might be needed.
+        required_cols_check = ['Transaction Type', 'Amount']
+        if not all(col in df.columns for col in required_cols_check):
+             st.warning(f"Uploaded Excel might be missing expected columns like: {', '.join(required_cols_check)}. Calculations might be affected.")
+        return df
+    except Exception as e:
+        st.error(f"Error reading or parsing Excel file: {e}")
+        return None # Return None to indicate failure
+
+def analyze_financials(df):
+    """Calculates income, expenses, profit, and margin from the DataFrame."""
+    if df is None or not all(col in df.columns for col in ['Transaction Type', 'Amount']):
+        return 0, 0, 0, 0 # Return zeros or handle error appropriately
+    try:
+        income = df.loc[df['Transaction Type'] == 'Income', 'Amount'].sum()
+        expenses = df.loc[df['Transaction Type'] == 'Expense', 'Amount'].sum()
+        profit = income - expenses
+        margin = profit / income if income else 0
+        return income, expenses, profit, margin
+    except Exception as e:
+        st.error(f"Error analyzing financials: {e}")
+        return 0, 0, 0, 0
+
+def estimate_tax(df, rate=0.25):
+    """Estimates tax liability based on income and sums TDS."""
+    if df is None or not all(col in df.columns for col in ['Transaction Type', 'Amount']):
+        return 0, 0
+    try:
+        income_total = df.loc[df['Transaction Type'] == 'Income', 'Amount'].sum()
+        tax = income_total * rate
+        # Safely get TDS, sum only numeric values, default to 0 if column missing or non-numeric
+        tds = pd.to_numeric(df.get('TDS Deducted', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
+        return tax, tds
+    except Exception as e:
+        st.error(f"Error estimating tax: {e}")
+        return 0, 0
+
+def summarize_gst(df, gst_rate=0.18):
+    """Summarizes Input and Output GST based on 'GST Included' column."""
+    input_gst = output_gst = 0.0
+    if df is None or not all(col in df.columns for col in ['Transaction Type', 'Amount', 'GST Included']):
+        st.warning("GST calculation requires 'Transaction Type', 'Amount', and 'GST Included' columns.")
+        return 0, 0, 0
+    try:
+        for _, row in df.iterrows():
+            # Ensure 'GST Included' is treated as boolean, handle potential non-boolean values
+            gst_included_flag = False
+            if isinstance(row['GST Included'], bool):
+                gst_included_flag = row['GST Included']
+            elif isinstance(row['GST Included'], str):
+                 gst_included_flag = row['GST Included'].strip().upper() == 'TRUE' # Example handling for string 'TRUE'
+
+            if gst_included_flag:
+                amount = pd.to_numeric(row['Amount'], errors='coerce')
+                if pd.isna(amount): continue # Skip if amount is not numeric
+
+                base = amount / (1 + gst_rate)
+                gst_amt = base * gst_rate
+                if row['Transaction Type'] in ['Income', 'GST Sale']:
+                    output_gst += gst_amt
+                elif row['Transaction Type'] in ['Expense', 'Asset']: # Assuming Assets also have input GST
+                    input_gst += gst_amt
+        net_gst = output_gst - input_gst
+        return input_gst, output_gst, net_gst
+    except Exception as e:
+        st.error(f"Error summarizing GST: {e}")
+        return 0, 0, 0
+
+def generate_visual_dashboards(df):
+    """Generates visual dashboards (placeholder)."""
+    if df is None:
+        return "No data available for dashboard."
+    # Placeholder: Create a simple bar chart
+    try:
+        income, expenses, profit, _ = analyze_financials(df)
+        chart_data = pd.DataFrame({
+            'Metric': ['Income', 'Expenses', 'Profit'],
+            'Amount': [income, expenses, profit]
+        })
+        st.bar_chart(chart_data.set_index('Metric'))
+        return "Basic P&L Chart Displayed Above." # Return text confirmation
+    except Exception as e:
+        st.error(f"Could not generate dashboard chart: {e}")
+        return "Error generating dashboard."
+
+
+def to_docx(text):
+    """Creates a .docx file in memory containing the response text."""
+    doc = Document()
+    doc.add_paragraph(text)
+    buf = BytesIO(); doc.save(buf); buf.seek(0)
+    return buf
+
+# --- Main Content Tabs ---
+tab_chat, tab_docs, tab_clients, tab_reminders, tab_balance_sheet = st.tabs(["Chat/Tasks", "Document Processing", "Client Management", "Reminders", "Balance Sheet Analyzer"])
+
+with tab_balance_sheet:
+    st.markdown("### Balance Sheet Analyzer & Tax Estimator")
+    uploaded_excel = st.file_uploader("Upload Excel (Tally/CSV) Reports", type=["xlsx","xls","csv"], key="balance_sheet_analyzer_uploader_tab") # Unique key for tab
+
+    if uploaded_excel is not None: # Check if parsing was successful
+        st.write("Uploaded file:", uploaded_excel.name)
+        
+        df_financials = parse_excel_data(uploaded_excel) # Parse the data
+        if df_financials is not None:
+            st.dataframe(df_financials.head()) # Show head of dataframe
+
+            # Perform calculations
+            income, expenses, profit, margin = analyze_financials(df_financials)
+            tax, tds = estimate_tax(df_financials)
+            input_gst, output_gst, net_gst = summarize_gst(df_financials)
+
+            # Display results
+            st.subheader("Financial Summary")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Income", f"₹{income:,.2f}")
+            c2.metric("Expenses", f"₹{expenses:,.2f}")
+            c3.metric("Profit", f"₹{profit:,.2f}")
+            c4.metric("Margin", f"{margin:.1%}")
+
+            st.subheader("Tax & GST Summary")
+            st.markdown(f"*Estimated Tax Liability (25% on Income):* ₹{tax:,.2f}")
+            st.markdown(f"*TDS Deducted:* ₹{tds:,.2f}")
+            st.markdown(f"*Total Output GST:* ₹{output_gst:,.2f}")
+            st.markdown(f"*Total Input GST:* ₹{input_gst:,.2f}")
+            st.markdown(f"*Net GST Payable:* ₹{net_gst:,.2f}")
+
+            st.subheader("Visual Dashboard")
+            dashboard_status = generate_visual_dashboards(df_financials) # Generate and display chart
+            st.caption(dashboard_status) # Display status/confirmation
+
+            # Download Report Button
+            if st.button("Generate Executive Report (.docx)", key="download_report_button"):
+                summary_text = (
+                    f"Financial Report for: {uploaded_excel.name}\n\n"
+                    f"Income: ₹{income:,.2f}\n"
+                    f"Expenses: ₹{expenses:,.2f}\n"
+                    f"Profit: ₹{profit:,.2f} (Margin: {margin:.1%})\n\n"
+                    f"Estimated Tax Liability (25% on Income): ₹{tax:,.2f}\n"
+                    f"TDS Deducted: ₹{tds:,.2f}\n\n"
+                    f"Output GST: ₹{output_gst:,.2f}\n"
+                    f"Input GST: ₹{input_gst:,.2f}\n"
+                    f"Net GST Payable: ₹{net_gst:,.2f}\n"
+                )
+                report_buffer = to_docx(summary_text)
+                st.download_button(
+                    label="Download Report Now",
+                    data=report_buffer,
+                    file_name=f"FinIQ_Report_{uploaded_excel.name}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
         else:
+            st.error("Could not process the uploaded Excel file. Please check the file format and content.")
+
+with tab_chat:
+    st.header("Chat with Financial Expert")
+    
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    # Chat input and processing
+    if prompt := st.chat_input("Ask the financial expert..."):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
 
-# Function to generate chain-of-thought prompt
-def generate_cot_prompt(task, data_points):
-    # --- (Keep your existing generate_cot_prompt function) ---
-    prompt = f"""You are a financial expert. Your current task is: {task}
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    You have the following data points to work with:
-    {data_points}
-
-    What is the next logical step to achieve this task?
-    What information do you need to proceed?
-    Ask a specific question to get that information.
-
-    Your response should be in the following format:
-    \"\"\"
-    Next Step: [The next logical step]
-    Information Needed: [The information you need]
-    Question: [A specific question to get that information]
-    \"\"\"
-    """
-    return prompt
-
-# Function to get the next question
-def get_next_question():
-    # --- (Keep your existing get_next_question function) ---
-    if st.session_state.current_task_index < len(st.session_state.tasks):
-        task = st.session_state.tasks[st.session_state.current_task_index]
-        data_points = st.session_state.data_points
-        cot_prompt = generate_cot_prompt(task, data_points)
-
-        try:
-            # Make sure 'ollama' command is accessible in the system PATH
-            # Handle potential encoding issues if needed
-            result = subprocess.run(['ollama', 'run', 'mistral', cot_prompt],
-                                    capture_output=True, text=True, check=True, encoding='utf-8')
-            response = result.stdout.strip() # Strip leading/trailing whitespace
-
-            # Parse the response to extract the question - improved parsing
-            question_part = response.split("Question:")
-            if len(question_part) > 1:
-                 question = question_part[1].strip().replace("\"", "").replace("”", "").replace("“","") # Remove quotes
-                 if not question: # Handle empty question after split
-                     question = "Could you please provide more details or the next piece of information?"
-            else: # Fallback if parsing fails
-                 question = "What was your total revenue for the period?" # Or a more generic fallback
-            return question
-
-        except FileNotFoundError:
-             st.error("Ollama command not found. Please ensure Ollama is installed and in your system's PATH.")
-             return None # Indicate error
-        except subprocess.CalledProcessError as e:
-            st.error(f"Error running Ollama: {e}\nOutput: {e.stdout}\nError: {e.stderr}")
-            return "An error occurred while generating the next question. Please try again." # Error message
-        except Exception as e: # Catch other potential errors
-            st.error(f"An unexpected error occurred: {e}")
-            return "An unexpected error occurred. Please check the logs."
-
-    else:
-        return "All tasks completed. Would you like to generate the reports?"
-
-# Function to save response text to a docx file in memory
-def save_response_to_docx(response_text):
-    """Creates a .docx file in memory containing the response text."""
-    document = Document()
-    document.add_paragraph(response_text)
-    # Save document to a BytesIO object
-    buffer = BytesIO()
-    document.save(buffer)
-    buffer.seek(0)  # Rewind the buffer to the beginning
-    return buffer
-
-# --- Chat Input Logic ---
-next_q = get_next_question()
-if next_q: # Only show input if there's a valid next question or prompt
-    prompt = st.chat_input(next_q)
-else:
-    # Handle the case where ollama might not be available or errored
-    st.warning("Could not get the next question. Please ensure Ollama is running correctly.")
-    prompt = None # Disable input if no question
-
-if prompt:
-    # Display user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # --- Assistant Response Generation ---
-    # (This part might be where you ask Mistral to *process* the user's input,
-    # not just ask the next question. Let's assume for now the goal is
-    # to just display *some* response and make it editable).
-
-    # Placeholder: Simulate getting a response based on the user's prompt
-    # In a real scenario, you'd feed the prompt AND context to Mistral
-    # to get a relevant answer. Here, we'll just use a placeholder response
-    # or re-run Mistral with the user's prompt for a direct answer.
-    try:
-        # Example: Run ollama again with the user's prompt for a direct response
-        # You might want a more sophisticated logic here depending on your agent's design
-        llm_process_prompt = f"Based on the previous context and the user's input '{prompt}', provide a relevant response or analysis."
-        result = subprocess.run(['ollama', 'run', 'mistral', llm_process_prompt], # Use user's prompt
-                                capture_output=True, text=True, check=True, encoding='utf-8')
-        assistant_response_text = result.stdout.strip()
-
-    except FileNotFoundError:
-         assistant_response_text = "Error: Ollama command not found."
-         st.error(assistant_response_text)
-    except subprocess.CalledProcessError as e:
-        assistant_response_text = f"Error running Ollama: {e.stderr or e.stdout or e}"
-        st.error(assistant_response_text)
-    except Exception as e:
-        assistant_response_text = f"An unexpected error occurred: {e}"
-        st.error(assistant_response_text)
-
-
-    # --- Display Assistant Response with Editing and Download ---
-    with st.chat_message("assistant"):
-        # Use a unique key for the text_area based on message index or similar
-        # This prevents issues if multiple editable areas exist.
-        message_key = f"response_edit_{len(st.session_state.messages)}"
-
-        # Display the editable response area
-        edited_response = st.text_area(
-            "Edit Response:",
-            value=assistant_response_text, # Pre-fill with the generated response
-            height=200,
-            key=message_key # Unique key
-        )
-
-        # Save the edited response to a docx file in memory
-        docx_buffer = save_response_to_docx(edited_response)
-
-        # Add download button for the *edited* response
-        st.download_button(
-            label="Download Edited Response (.docx)",
-            data=docx_buffer, # Use the buffer containing the docx data
-            file_name=f"FinIQ_response_{len(st.session_state.messages)}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", # MIME type for docx
-        )
-
-        # Store original/edited content in history (optional, decide structure)
-        # Simple approach: Store the original response text.
-        # Complex: Store both original and last edited state.
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": {"original": assistant_response_text, "edited": edited_response} # Store both if needed
-            # Or just store the original: "content": assistant_response_text
-        })
-
-
-    # --- Update Data Points & Tasks (Your existing logic) ---
-    # Placeholder: Extract data from 'prompt' or 'edited_response' if needed
-    # This part needs actual logic to parse the user's input (prompt) or
-    # maybe even the edited_response to find values for DATA_POINTS.
-    # For now, it's just illustrative.
-    extracted_data = {} # Replace with actual extraction logic based on 'prompt'
-
-    # Update data points based on extracted information
-    for key, value in extracted_data.items():
-        if key in st.session_state.data_points:
-            # Ensure 'value' key exists before assignment
-            if "value" not in st.session_state.data_points[key]:
-                 st.session_state.data_points[key]["value"] = None # Or 0, or appropriate default
-            st.session_state.data_points[key]["extracted"] = True
-            st.session_state.data_points[key]["value"] = value # Store the extracted value
-
-    # Check if all data points are collected for the current task
-    # This logic might need refinement based on which data points belong to which task
-    task_data_points_keys = list(DATA_POINTS.keys()) # Assuming all points needed for *first* task initially
-    all_required_points_collected = True
-    for data_key in task_data_points_keys:
-        if not st.session_state.data_points[data_key].get("extracted", False):
-             all_required_points_collected = False
-             break
-
-    # If all data points are collected, move to the next task
-    if all_required_points_collected and st.session_state.current_task_index < len(st.session_state.tasks):
-        # Check if we are not already past the last task before incrementing
-        st.session_state.current_task_index += 1
-        st.info(f"Moving to next task: {st.session_state.tasks[st.session_state.current_task_index] if st.session_state.current_task_index < len(st.session_state.tasks) else 'Completion'}")
-        # Reset the extracted status if needed for the next task (depends on your logic)
-        # for key in st.session_state.data_points:
-        #     st.session_state.data_points[key]["extracted"] = False
-        st.rerun() # Rerun to get the next question immediately
-
-
-    # Check if all tasks are completed
-    all_tasks_completed = st.session_state.current_task_index >= len(st.session_state.tasks)
-
-    # Generate reports if all tasks are completed (Placeholder)
-    if all_tasks_completed:
-        st.success("All tasks completed! Ready to generate reports.")
-        # Add report generation button or logic here
-        if st.button("Generate Final Reports"):
-             st.write("Generating financial reports...")
-             # Add actual report generation logic here
-             # You might generate DOCX reports here as well
-
-
-# --- OCR Functionality (Keep your existing OCR section) ---
-st.markdown("---")
-st.markdown("### Document Processing")
-
-# Create temporary directory
-UPLOAD_DIR = "data/uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# File upload section
-uploaded_files = st.file_uploader("Choose PDF files",
-                                type="pdf",
-                                accept_multiple_files=True,
-                                help="Select one or more PDF files to process")
-
-if uploaded_files:
-    process_btn = st.button("Process Documents")
-
-    if process_btn:
-        # Clear previous uploads if desired
-        # shutil.rmtree(UPLOAD_DIR)
-        # os.makedirs(UPLOAD_DIR)
-
-        for file in uploaded_files:
-            with st.spinner(f"Processing {file.name}..."):
+        # Generate AI response
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing your query..."):
                 try:
-                    # Save uploaded file
-                    save_path = os.path.join(UPLOAD_DIR, file.name)
-                    with open(save_path, "wb") as f:
-                        f.write(file.getbuffer())
+                    # Create system prompt for financial focus
+                    system_prompt = f"""You are a financial expert assistant.
+                        Respond to the user's query about financial matters: {prompt}
+                        Provide clear, professional advice with explanations.
+                        If discussing numbers, format them clearly."""
+                    
+                    # Get response from Mistral via Ollama
+                    result = subprocess.run(
+                        ['ollama', 'run', 'mistral', system_prompt],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                        encoding='utf-8'
+                    )
+                    response = result.stdout.strip()
+                    
+                    # Display and store response
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
 
-                    # Perform OCR (Assuming these functions exist)
-                    extracted_text = perform_ocr(save_path)
+                except subprocess.CalledProcessError as e:
+                    st.error(f"Error generating response: {e.stderr}")
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {str(e)}")
 
-                    # Generate response (Assuming these functions exist)
-                    response_text = auto_draft_response(extracted_text)
+
+with tab_docs:
+    st.header("Document Processing")
+
+    def extract_due_date(text):
+        """
+        Extracts a potential due date from the text based on keywords.
+        Looks for the first date after "due date", "deadline", or "payment by".
+        """
+        keywords = ["due date", "deadline", "payment by"]
+        # Regex to find common date formats (DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, Month Day, Year)
+        # This is a basic pattern and might need refinement for more complex cases
+        date_pattern = r'\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}'
+
+        text_lower = text.lower()
+
+        for keyword in keywords:
+            keyword_index = text_lower.find(keyword)
+            if keyword_index != -1:
+                # Search for a date pattern after the keyword
+                search_start_index = keyword_index + len(keyword)
+                match = re.search(date_pattern, text[search_start_index:])
+                if match:
+                    return match.group(0) # Return the first found date after the keyword
+
+        return None # Return None if no date is found after any keyword
+
+
+    def process_document(uploaded_file):
+        """
+        Performs OCR on the uploaded document, extracts due date, and generates a response.
+        """
+        if uploaded_file is not None:
+            with st.spinner("Processing document..."):
+                # Create temporary directory if it doesn't exist
+                UPLOAD_DIR = "data/uploads"
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+                # Save uploaded file temporarily
+                file_path = os.path.join(UPLOAD_DIR, uploaded_file.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
+
+                # Perform OCR
+                extracted_text = perform_ocr(file_path)
+                due_date = extract_due_date(extracted_text) # Extract due date
+                if extracted_text:
+                    # Generate response
+                    response_letter = auto_draft_response(extracted_text)
 
                     # Display results
-                    with st.expander(f"Results for {file.name}", expanded=True):
+                    with st.expander(f"Results for {uploaded_file.name}", expanded=True):
                         col1, col2 = st.columns(2)
                         with col1:
                             st.subheader("Extracted Text")
                             st.code(extracted_text, language="markdown")
                         with col2:
                             st.subheader("Generated Response")
-                            # Make OCR response editable and downloadable too? (Optional)
-                            ocr_edited_response = st.text_area(f"Edit OCR Response ({file.name}):", response_text, height=150, key=f"ocr_edit_{file.name}")
+                            ocr_edited_response = st.text_area(f"Edit OCR Response ({uploaded_file.name}):", response_letter, height=150, key=f"ocr_edit_{uploaded_file.name}")
                             ocr_docx_buffer = save_response_to_docx(ocr_edited_response)
                             st.download_button(
                                 label=f"Download OCR Response (.docx)",
                                 data=ocr_docx_buffer,
-                                file_name=f"FinIQ_OCR_{file.name}.docx",
+                                file_name=f"FinIQ_OCR_{uploaded_file.name}.docx",
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             )
 
+                    # Add reminder if due date is found
+                    if due_date:
+                        st.write("Extracted Due Date:", due_date) # Display due date
+                        st.session_state.due_date = due_date # Store in session state
+                        # Add reminder to database - associate with selected client if available
+                        client_id_for_reminder = st.session_state.selected_client_id if st.session_state.selected_client_id else None
+                        reminder_description = f"Due date from {uploaded_file.name}"
+                        try:
+                            database.add_reminder(client_id_for_reminder, due_date, reminder_description)
+                            st.success(f"Reminder added for {due_date}")
+                        except Exception as e:
+                            st.error(f"Error adding reminder to database: {e}")
 
-                    st.success(f"Successfully processed {file.name}")
+                    else:
+                        st.write("Due Date: Not found")
+                        st.session_state.due_date = None
 
-                except NameError as ne:
-                     st.error(f"Error: A required function (like perform_ocr or auto_draft_response) is not defined: {ne}")
+
+                    st.success(f"Successfully processed {uploaded_file.name}")
+                    # Optionally add document to database here, linking to client if selected
+                    # if st.session_state.selected_client_id:
+                    #     try:
+                    #         database.add_document(st.session_state.selected_client_id, uploaded_file.name, file_path, "Unknown") # Document type could be extracted or selected
+                    #         st.info(f"Document linked to client ID: {st.session_state.selected_client_id}")
+                    #     except Exception as e:
+                    #         st.error(f"Error linking document to client: {e}")
+
+
+                else:
+                    return "Error: Could not extract text from document.", None
+        else:
+            return "Please upload a document.", None
+
+
+    # File upload section
+    uploaded_files = st.file_uploader("Choose PDF files",
+                                    type="pdf",
+                                    accept_multiple_files=True,
+                                    help="Select one or more PDF files to process")
+
+    if uploaded_files:
+        process_btn = st.button("Process Documents")
+
+        if process_btn:
+            # Clear previous uploads if desired
+            # shutil.rmtree(UPLOAD_DIR)
+            # os.makedirs(UPLOAD_DIR)
+
+            for file in uploaded_files:
+                process_document(file) # Process each uploaded file
+
+
+    st.markdown("---")
+    st.caption("Note: Uploaded files are temporarily stored for processing.")
+
+
+with tab_clients:
+    st.header("Client Management")
+
+    # Add Client Form
+    with st.form("add_client_form_tab"):
+        st.subheader("Add New Client")
+        client_name = st.text_input("Client Name*")
+        client_email = st.text_input("Email (optional)")
+        client_phone = st.text_input("Phone (optional)")
+        
+        # Email validation using regex
+        email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+        if client_email and not re.match(email_regex, client_email):
+            st.error("Invalid email format.")
+            submit_button = st.form_submit_button("Add Client", disabled=True) # Disable submit button if email is invalid
+        else:
+            submit_button = st.form_submit_button("Add Client")
+        if submit_button:
+            if client_name:
+                try:
+                    client_id = database.add_client(client_name, client_email, client_phone)
+                    st.success(f"Client '{client_name}' added successfully with ID: {client_id}")
+                    st.session_state.selected_client_id = client_id # Select the newly added client
+                    st.rerun() # Rerun to update the client list and potentially select the new client
                 except Exception as e:
-                    st.error(f"Error processing {file.name}: {str(e)}")
+                    st.error(f"Error adding client: {e}")
+            else:
+                st.error("Client Name is required.")
 
-st.markdown("---")
-st.caption("Note: Uploaded files are temporarily stored for processing.")
+    st.markdown("---")
+    st.subheader("Existing Clients")
+
+    # Display Existing Clients
+    clients = database.get_all_clients()
+    if clients:
+        client_names = [client[1] for client in clients]
+        selected_client_name = st.selectbox("Select a Client", ["-- Select Client --"] + client_names)
+
+        if selected_client_name != "-- Select Client --":
+            # Find the selected client's ID
+            selected_client = next((client for client in clients if client[1] == selected_client_name), None)
+            if selected_client:
+                st.session_state.selected_client_id = selected_client[0]
+                st.write(f"**Selected Client:** {selected_client[1]}")
+                st.write(f"Email: {selected_client[2]}")
+                st.write(f"Phone: {selected_client[3]}")
+                st.write(f"Added On: {selected_client[4]}")
+
+                # Display documents for the selected client (Optional)
+                # st.subheader("Documents")
+                # client_documents = database.get_documents_by_client(st.session_state.selected_client_id)
+                # if client_documents:
+                #     for doc in client_documents:
+                #         st.write(f"- {doc[2]} (Uploaded: {doc[5]})")
+                # else:
+                #     st.info("No documents found for this client.")
+
+                # Display reminders for the selected client
+                st.subheader("Reminders for this Client")
+                client_reminders = database.get_reminders(st.session_state.selected_client_id)
+                if client_reminders:
+                    for reminder in client_reminders:
+                        st.write(f"- **Due Date:** {reminder[2]}, **Description:** {reminder[3]}")
+                else:
+                    st.info("No reminders found for this client.")
+
+
+        else:
+            st.session_state.selected_client_id = None # Deselect client if "-- Select Client --" is chosen
+
+    else:
+        st.info("No clients added yet.")
+
+
+with tab_reminders:
+    st.header("Reminders")
+
+    # Add New Reminder Form
+    with st.form("add_reminder_form"):
+        st.subheader("Add New Reminder")
+        # Optionally link to a client
+        clients_for_reminder = database.get_all_clients()
+        client_options = {client[1]: client[0] for client in clients_for_reminder}
+        selected_client_name_reminder = st.selectbox("Link to Client (optional)", ["-- Select Client --"] + list(client_options.keys()))
+        linked_client_id = client_options.get(selected_client_name_reminder) if selected_client_name_reminder != "-- Select Client --" else None
+
+        reminder_date = st.date_input("Due Date")
+        reminder_time = st.time_input("Reminder Time", value=datetime.now().time()) # Add time input with default value
+        reminder_frequency = st.selectbox("Frequency", ["Once", "Daily", "Weekly", "Monthly"], index=0) # Frequency dropdown
+        reminder_description = st.text_area("Description")
+        add_reminder_button = st.form_submit_button("Add Reminder")
+
+        if add_reminder_button:
+            if reminder_date and reminder_description:
+                # Check if a client is linked and if they have an email
+                if linked_client_id:
+                    client = database.get_client_by_id(linked_client_id)
+                    # client[2] is the email field from the database query result
+                    if client and (client[2] is None or client[2].strip() == ""):
+                        st.error("Cannot add reminder: Selected client does not have an email address.")
+                        # Stop here if client has no email
+
+                try:
+                    # Convert date and time objects to strings for storage
+                    due_date_str = reminder_date.strftime("%Y-%m-%d")
+                    reminder_time_str = reminder_time.strftime("%H:%M") # Format time
+                    database.add_reminder(linked_client_id, due_date_str, reminder_time_str, reminder_frequency, reminder_description)
+                    st.success("Reminder added successfully!")
+                    st.rerun() # Rerun to update the reminders list
+                except Exception as e:
+                    st.error(f"Error adding reminder: {e}")
+            else:
+                st.error("Due Date and Description are required.")
+
+    st.markdown("---")
+    st.subheader("Upcoming Reminders")
+
+    # Display Reminders
+    all_reminders = database.get_reminders()
+    if all_reminders:
+        # Sort reminders by due date
+        sorted_reminders = sorted(all_reminders, key=lambda x: x[2])
+        for reminder in sorted_reminders:
+            client_info = ""
+            if reminder[1]: # If client_id is not None
+                client = database.get_client_by_id(reminder[1])
+                if client:
+                    client_info = f" (Client: {client[1]})"
+            st.write(f"- **Due Date:** {reminder[2]}, **Description:** {reminder[3]}{client_info}")
+    else:
+        st.info("No reminders added yet.")

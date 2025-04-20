@@ -1,0 +1,27 @@
+Python-dotenv could not parse statement starting at line 1
+Python-dotenv could not parse statement starting at line 2
+Python-dotenv could not parse statement starting at line 3
+Python-dotenv could not parse statement starting at line 4
+Python-dotenv could not parse statement starting at line 5
+Python-dotenv could not parse statement starting at line 6
+2025-04-20 18:19:31,619 - INFO - Starting Flask completion server...
+2025-04-20 18:19:31,619 - WARNING - Python-dotenv could not parse statement starting at line 1
+2025-04-20 18:19:31,619 - WARNING - Python-dotenv could not parse statement starting at line 2
+2025-04-20 18:19:31,619 - WARNING - Python-dotenv could not parse statement starting at line 3
+2025-04-20 18:19:31,619 - WARNING - Python-dotenv could not parse statement starting at line 4
+2025-04-20 18:19:31,619 - WARNING - Python-dotenv could not parse statement starting at line 5
+2025-04-20 18:19:31,619 - WARNING - Python-dotenv could not parse statement starting at line 6
+ * Serving Flask app 'completion_server'
+ * Debug mode: off
+Address already in use
+Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.
+On macOS, try disabling the 'AirPlay Receiver' service from System Preferences -> General -> AirDrop & Handoff.
+2025-04-20 18:21:10,633 - INFO - Starting Flask completion server on port 5001...
+ * Serving Flask app 'completion_server'
+ * Debug mode: off
+2025-04-20 18:21:10,641 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://192.168.0.219:5001
+2025-04-20 18:21:10,641 - INFO - [33mPress CTRL+C to quit[0m
+2025-04-20 18:21:22,446 - INFO - 127.0.0.1 - - [20/Apr/2025 18:21:22] "GET /test-email HTTP/1.1" 200 -

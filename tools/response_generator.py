@@ -30,11 +30,13 @@ Draft the letter below this line:
         response_letter = "Error generating response."
     return response_letter
 
-def save_response_to_docx(response_letter, output_path="response.docx"):
-    if os.path.exists(output_path):
-        os.remove(output_path)
+from io import BytesIO
+
+def save_response_to_docx(response_letter):
+    docx_buffer = BytesIO()
     document = Document()
     document.add_heading('Response Letter', 0)
     document.add_paragraph(response_letter)
-    document.save(output_path)
-    print(f"Response letter saved to {output_path}")
+    document.save(docx_buffer)
+    docx_buffer.seek(0)  # Go to the start of the buffer
+    return docx_buffer

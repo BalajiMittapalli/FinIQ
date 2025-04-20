@@ -29,6 +29,25 @@ def perform_ocr(image_path):
         print(f"Error processing image {image_path} with DocumentConverter: {e}")
         return None
 
+def extract_due_date(markdown_text):
+    """
+    Extracts due date from markdown text using regex.
+    """
+    import re
+    date_patterns = [
+        r"Due Date:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",  # DD/MM/YYYY, DD-MM-YYYY, DD/MM/YY, DD-MM-YY
+        r"Payment Date:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"Date Due:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"Expiry Date:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", # Added "Expiry Date" as a possible indicator
+        r"Last Date to Pay:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})" # Added "Last Date to Pay"
+        # Add more patterns as needed
+    ]
+    for pattern in date_patterns:
+        match = re.search(pattern, markdown_text, re.IGNORECASE)
+        if match:
+            return match.group(1)  # Return the first captured group (the date)
+    return None  # Return None if no date is found
+
 def main():
     """
     Main function to iterate through images in the data folder and perform OCR.
