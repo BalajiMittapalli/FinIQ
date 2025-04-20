@@ -1,7 +1,7 @@
 import os
 # import cv2 # No longer needed for basic OCR with DocumentConverter
 # Import the specific converter class
-from docling.document_converter import DocumentConverter
+from tools.ocr_engine import DocumentConverter
 
 # Instantiate the converter once outside the function for efficiency
 converter = DocumentConverter()
