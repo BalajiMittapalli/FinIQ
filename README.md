@@ -91,10 +91,8 @@ The application uses the following Python libraries:
     - **Reminders:** Set and track reminders.
     - **Balance Sheet Analyzer:** Upload and analyze Excel reports.
 
+DEMO LINK: https://youtu.be/NQA8DbALQq8
 
-## Contributing
-
-Contributions are welcome! Please fork the repository and submit a pull request with your changes.
 
 ## License
 
